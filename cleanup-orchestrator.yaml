@@ -1,0 +1,259 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IAM Cleanup Part 2 – Quarantine and Deletion orchestrator
+
+Parameters:
+  InputTableName:
+    Type: String
+    Description: Part 1 DynamoDB table name (IamStackRoleUsage-<stack>)
+  CleanupTableName:
+    Type: String
+    Default: IamCleanupStatus
+  ExecutionRoleName:
+    Type: String
+    Default: IAMCleanupExecutionRole
+  TargetAccountIds:
+    Type: CommaDelimitedList
+
+  # S3 for backups (trust policies) & lambda code
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket for backups (and optionally outputs)
+  LambdaCodeBucket:
+    Type: String
+  PlannerKey:
+    Type: String
+  QuarantineKey:
+    Type: String
+  CFNPlanKey:
+    Type: String
+  CFNExecKey:
+    Type: String
+  FinalizeKey:
+    Type: String
+  NotifierKey:
+    Type: String
+
+  SlackWebhookSSMParam:
+    Type: String
+    Default: /iam-cleanup/slack-webhook
+
+Resources:
+  CleanupTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref CleanupTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: Pk, AttributeType: S }
+        - { AttributeName: Sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: Pk, KeyType: HASH }
+        - { AttributeName: Sk, KeyType: RANGE }
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub iam-cleanup-part2-lambda-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: Part2Core
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ sts:AssumeRole ]
+                Resource: !Sub arn:aws:iam::*:role/${ExecutionRoleName}
+              - Effect: Allow
+                Action: [ dynamodb:GetItem, dynamodb:Query, dynamodb:Scan ]
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${InputTableName}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${InputTableName}/index/*
+              - Effect: Allow
+                Action: [ dynamodb:PutItem, dynamodb:UpdateItem ]
+                Resource: !GetAtt CleanupTable.Arn
+              - Effect: Allow
+                Action: [ s3:PutObject, s3:GetObject, s3:ListBucket ]
+                Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+              - Effect: Allow
+                Action: [ ssm:GetParameter ]
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*
+
+  PlannerFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub iam-cleanup-planner-${AWS::StackName}
+      Role: !GetAtt LambdaRole.Arn
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 900
+      MemorySize: 512
+      Code: { S3Bucket: !Ref LambdaCodeBucket, S3Key: !Ref PlannerKey }
+      Environment:
+        Variables:
+          INPUT_TABLE: !Ref InputTableName
+          CLEANUP_TABLE: !Ref CleanupTableName
+
+  QuarantineFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub iam-cleanup-quarantine-${AWS::StackName}
+      Role: !GetAtt LambdaRole.Arn
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 900
+      MemorySize: 512
+      Code: { S3Bucket: !Ref LambdaCodeBucket, S3Key: !Ref QuarantineKey }
+      Environment:
+        Variables:
+          CLEANUP_TABLE: !Ref CleanupTableName
+          EXECUTION_ROLE_NAME: !Ref ExecutionRoleName
+          ARTIFACT_BUCKET: !Ref ArtifactBucket
+
+  CFNPlanFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub iam-cleanup-cfn-plan-${AWS::StackName}
+      Role: !GetAtt LambdaRole.Arn
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 900
+      MemorySize: 512
+      Code: { S3Bucket: !Ref LambdaCodeBucket, S3Key: !Ref CFNPlanKey }
+      Environment:
+        Variables:
+          INPUT_TABLE: !Ref InputTableName
+          CLEANUP_TABLE: !Ref CleanupTableName
+          EXECUTION_ROLE_NAME: !Ref ExecutionRoleName
+
+  CFNExecFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub iam-cleanup-cfn-exec-${AWS::StackName}
+      Role: !GetAtt LambdaRole.Arn
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 900
+      MemorySize: 512
+      Code: { S3Bucket: !Ref LambdaCodeBucket, S3Key: !Ref CFNExecKey }
+      Environment:
+        Variables:
+          CLEANUP_TABLE: !Ref CleanupTableName
+          EXECUTION_ROLE_NAME: !Ref ExecutionRoleName
+
+  FinalizeFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub iam-cleanup-finalize-${AWS::StackName}
+      Role: !GetAtt LambdaRole.Arn
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 900
+      MemorySize: 512
+      Code: { S3Bucket: !Ref LambdaCodeBucket, S3Key: !Ref FinalizeKey }
+      Environment:
+        Variables:
+          CLEANUP_TABLE: !Ref CleanupTableName
+          EXECUTION_ROLE_NAME: !Ref ExecutionRoleName
+
+  NotifierFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub iam-cleanup-notifier-${AWS::StackName}
+      Role: !GetAtt LambdaRole.Arn
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 60
+      MemorySize: 128
+      Code: { S3Bucket: !Ref LambdaCodeBucket, S3Key: !Ref NotifierKey }
+      Environment:
+        Variables:
+          SLACK_WEBHOOK_PARAM: !Ref SlackWebhookSSMParam
+
+  SfnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub iam-cleanup-part2-sfn-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: Invoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ lambda:InvokeFunction ]
+                Resource:
+                  - !GetAtt PlannerFn.Arn
+                  - !GetAtt QuarantineFn.Arn
+                  - !GetAtt CFNPlanFn.Arn
+                  - !GetAtt CFNExecFn.Arn
+                  - !GetAtt FinalizeFn.Arn
+                  - !GetAtt NotifierFn.Arn
+
+  CleanupStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub iam-cleanup-part2-${AWS::StackName}
+      RoleArn: !GetAtt SfnRole.Arn
+      DefinitionString:
+        !Sub |
+          {{
+            "Comment": "Cleanup Part 2 Orchestrator",
+            "StartAt": "Planner",
+            "States": {{
+              "Planner": {{
+                "Type": "Task",
+                "Resource": "${{PlannerFn.Arn}}",
+                "ResultPath": "$.plan",
+                "Next": "Quarantine"
+              }},
+              "Quarantine": {{
+                "Type": "Task",
+                "Resource": "${{QuarantineFn.Arn}}",
+                "ResultPath": "$.quarantine",
+                "Next": "CFNPlan"
+              }},
+              "CFNPlan": {{
+                "Type": "Task",
+                "Resource": "${{CFNPlanFn.Arn}}",
+                "ResultPath": "$.cfnplan",
+                "Next": "CFNExec"
+              }},
+              "CFNExec": {{
+                "Type": "Task",
+                "Resource": "${{CFNExecFn.Arn}}",
+                "ResultPath": "$.cfnexec",
+                "Next": "Finalize"
+              }},
+              "Finalize": {{
+                "Type": "Task",
+                "Resource": "${{FinalizeFn.Arn}}",
+                "ResultPath": "$.final",
+                "Next": "Notify"
+              }},
+              "Notify": {{
+                "Type": "Task",
+                "Resource": "${{NotifierFn.Arn}}",
+                "End": true
+              }}
+            }}
+          }}
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref CleanupStateMachine
+  CleanupTableName:
+    Value: !Ref CleanupTableName

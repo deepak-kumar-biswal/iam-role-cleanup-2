@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Target execution role with mutate permissions for IAM cleanup (Part 2)
+
+Parameters:
+  OrchestratorAccountId:
+    Type: String
+  RoleName:
+    Type: String
+    Default: IAMCleanupExecutionRole
+
+Resources:
+  ExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${OrchestratorAccountId}:root
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IAMCleanupMutate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read
+              - Effect: Allow
+                Action:
+                  - iam:List*
+                  - iam:Get*
+                  - cloudformation:List*
+                  - cloudformation:Describe*
+                  - cloudformation:GetTemplate
+                  - lambda:ListFunctions
+                  - lambda:GetFunction
+                  - events:ListRules
+                  - events:DescribeRule
+                  - ecs:List*
+                  - ecs:Describe*
+                  - codebuild:ListProjects
+                  - codebuild:BatchGetProjects
+                  - codepipeline:ListPipelines
+                  - codepipeline:GetPipeline
+                  - glue:GetJobs
+                  - states:ListStateMachines
+                  - states:DescribeStateMachine
+                Resource: "*"
+              # Mutate IAM roles for quarantine & delete
+              - Effect: Allow
+                Action:
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfilesForRole
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:DeleteRole
+                Resource: "*"
+              # CloudFormation change sets + delete
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeChangeSet
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt ExecRole.Arn
